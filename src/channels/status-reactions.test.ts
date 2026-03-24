@@ -41,6 +41,21 @@ const createEnabledController = (
   return { adapter, calls, controller };
 };
 
+const createSetOnlyController = () => {
+  const calls: { method: string; emoji: string }[] = [];
+  const adapter: StatusReactionAdapter = {
+    setReaction: vi.fn(async (emoji: string) => {
+      calls.push({ method: "set", emoji });
+    }),
+  };
+  const controller = createStatusReactionController({
+    enabled: true,
+    adapter,
+    initialEmoji: "👀",
+  });
+  return { calls, controller };
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -131,6 +146,15 @@ describe("createStatusReactionController", () => {
     // After debounce period
     await vi.advanceTimersByTimeAsync(300);
     expect(calls).toContainEqual({ method: "set", emoji: DEFAULT_EMOJIS.thinking });
+  });
+
+  it("should debounce setCompacting and eventually call adapter", async () => {
+    const { calls, controller } = createEnabledController();
+
+    void controller.setCompacting();
+    await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+
+    expect(calls).toContainEqual({ method: "set", emoji: DEFAULT_EMOJIS.compacting });
   });
 
   it("should classify tool name and debounce", async () => {
@@ -230,6 +254,19 @@ describe("createStatusReactionController", () => {
     expect(calls.length).toBe(callsAfterFirst);
   });
 
+  it("should cancel a pending compacting emoji before resuming thinking", async () => {
+    const { calls, controller } = createEnabledController();
+
+    void controller.setCompacting();
+    await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs - 1);
+    controller.cancelPending();
+    void controller.setThinking();
+    await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+
+    const setEmojis = calls.filter((call) => call.method === "set").map((call) => call.emoji);
+    expect(setEmojis).toEqual([DEFAULT_EMOJIS.thinking]);
+  });
+
   it("should call removeReaction when adapter supports it and emoji changes", async () => {
     const { calls, controller } = createEnabledController();
 
@@ -245,19 +282,7 @@ describe("createStatusReactionController", () => {
   });
 
   it("should only call setReaction when adapter lacks removeReaction", async () => {
-    const calls: { method: string; emoji: string }[] = [];
-    const adapter: StatusReactionAdapter = {
-      setReaction: vi.fn(async (emoji: string) => {
-        calls.push({ method: "set", emoji });
-      }),
-      // No removeReaction
-    };
-
-    const controller = createStatusReactionController({
-      enabled: true,
-      adapter,
-      initialEmoji: "👀",
-    });
+    const { calls, controller } = createSetOnlyController();
 
     void controller.setQueued();
     await vi.runAllTimersAsync();
@@ -285,18 +310,7 @@ describe("createStatusReactionController", () => {
   });
 
   it("should handle clear gracefully when adapter lacks removeReaction", async () => {
-    const calls: { method: string; emoji: string }[] = [];
-    const adapter: StatusReactionAdapter = {
-      setReaction: vi.fn(async (emoji: string) => {
-        calls.push({ method: "set", emoji });
-      }),
-    };
-
-    const controller = createStatusReactionController({
-      enabled: true,
-      adapter,
-      initialEmoji: "👀",
-    });
+    const { calls, controller } = createSetOnlyController();
 
     await controller.clear();
 
@@ -365,56 +379,55 @@ describe("createStatusReactionController", () => {
     },
   ] as const;
 
+  const createControllerAfterThinking = async () => {
+    const state = createEnabledController();
+    void state.controller.setThinking();
+    await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+    return state;
+  };
+
   for (const testCase of stallCases) {
     it(`should trigger ${testCase.name}`, async () => {
-      const { calls, controller } = createEnabledController();
-
-      void controller.setThinking();
-      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      const { calls } = await createControllerAfterThinking();
       await vi.advanceTimersByTimeAsync(testCase.delayMs);
 
       expect(calls).toContainEqual({ method: "set", emoji: testCase.expected });
     });
   }
 
-  it("should reset stall timers on phase change", async () => {
-    const { calls, controller } = createEnabledController();
+  const stallResetCases = [
+    {
+      name: "phase change",
+      runUpdate: (controller: ReturnType<typeof createStatusReactionController>) => {
+        void controller.setTool("exec");
+        return vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      },
+    },
+    {
+      name: "repeated same-phase updates",
+      runUpdate: (controller: ReturnType<typeof createStatusReactionController>) => {
+        void controller.setThinking();
+        return Promise.resolve();
+      },
+    },
+  ] as const;
 
-    void controller.setThinking();
-    await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+  for (const testCase of stallResetCases) {
+    it(`should reset stall timers on ${testCase.name}`, async () => {
+      const { calls, controller } = await createControllerAfterThinking();
 
-    // Advance halfway to soft stall
-    await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.stallSoftMs / 2);
+      // Advance halfway to soft stall.
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.stallSoftMs / 2);
 
-    // Change phase
-    void controller.setTool("exec");
-    await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
+      await testCase.runUpdate(controller);
 
-    // Advance another halfway - should not trigger stall yet
-    await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.stallSoftMs / 2);
+      // Advance another halfway - should not trigger stall yet.
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.stallSoftMs / 2);
 
-    const stallCalls = calls.filter((c) => c.emoji === DEFAULT_EMOJIS.stallSoft);
-    expect(stallCalls).toHaveLength(0);
-  });
-
-  it("should reset stall timers on repeated same-phase updates", async () => {
-    const { calls, controller } = createEnabledController();
-
-    void controller.setThinking();
-    await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.debounceMs);
-
-    // Advance halfway to soft stall
-    await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.stallSoftMs / 2);
-
-    // Re-affirm same phase (should reset timers)
-    void controller.setThinking();
-
-    // Advance another halfway - should not trigger stall yet
-    await vi.advanceTimersByTimeAsync(DEFAULT_TIMING.stallSoftMs / 2);
-
-    const stallCalls = calls.filter((c) => c.emoji === DEFAULT_EMOJIS.stallSoft);
-    expect(stallCalls).toHaveLength(0);
-  });
+      const stallCalls = calls.filter((c) => c.emoji === DEFAULT_EMOJIS.stallSoft);
+      expect(stallCalls).toHaveLength(0);
+    });
+  }
 
   it("should call onError callback when adapter throws", async () => {
     const onError = vi.fn();
@@ -455,6 +468,7 @@ describe("constants", () => {
     const emojiKeys = [
       "queued",
       "thinking",
+      "compacting",
       "tool",
       "coding",
       "web",

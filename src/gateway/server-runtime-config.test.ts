@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveGatewayRuntimeConfig } from "./server-runtime-config.js";
 
 const TRUSTED_PROXY_AUTH = {
@@ -27,6 +27,7 @@ describe("resolveGatewayRuntimeConfig", () => {
             bind: "lan" as const,
             auth: TRUSTED_PROXY_AUTH,
             trustedProxies: ["192.168.1.1"],
+            controlUi: { allowedOrigins: ["https://control.example.com"] },
           },
         },
         expectedBindHost: "0.0.0.0",
@@ -46,6 +47,17 @@ describe("resolveGatewayRuntimeConfig", () => {
         name: "loopback binding with ::1 proxy",
         cfg: {
           gateway: { bind: "loopback" as const, auth: TRUSTED_PROXY_AUTH, trustedProxies: ["::1"] },
+        },
+        expectedBindHost: "127.0.0.1",
+      },
+      {
+        name: "loopback binding with loopback cidr proxy",
+        cfg: {
+          gateway: {
+            bind: "loopback" as const,
+            auth: TRUSTED_PROXY_AUTH,
+            trustedProxies: ["127.0.0.0/8"],
+          },
         },
         expectedBindHost: "127.0.0.1",
       },
@@ -79,7 +91,12 @@ describe("resolveGatewayRuntimeConfig", () => {
       {
         name: "lan binding without trusted proxies",
         cfg: {
-          gateway: { bind: "lan" as const, auth: TRUSTED_PROXY_AUTH, trustedProxies: [] },
+          gateway: {
+            bind: "lan" as const,
+            auth: TRUSTED_PROXY_AUTH,
+            trustedProxies: [],
+            controlUi: { allowedOrigins: ["https://control.example.com"] },
+          },
         },
         expectedMessage:
           "gateway auth mode=trusted-proxy requires gateway.trustedProxies to be configured",
@@ -92,10 +109,31 @@ describe("resolveGatewayRuntimeConfig", () => {
   });
 
   describe("token/password auth modes", () => {
+    let originalToken: string | undefined;
+
+    beforeEach(() => {
+      originalToken = process.env.OPENCLAW_GATEWAY_TOKEN;
+      delete process.env.OPENCLAW_GATEWAY_TOKEN;
+    });
+
+    afterEach(() => {
+      if (originalToken !== undefined) {
+        process.env.OPENCLAW_GATEWAY_TOKEN = originalToken;
+      } else {
+        delete process.env.OPENCLAW_GATEWAY_TOKEN;
+      }
+    });
+
     it.each([
       {
         name: "lan binding with token",
-        cfg: { gateway: { bind: "lan" as const, auth: TOKEN_AUTH } },
+        cfg: {
+          gateway: {
+            bind: "lan" as const,
+            auth: TOKEN_AUTH,
+            controlUi: { allowedOrigins: ["https://control.example.com"] },
+          },
+        },
         expectedAuthMode: "token",
         expectedBindHost: "0.0.0.0",
       },
@@ -115,7 +153,8 @@ describe("resolveGatewayRuntimeConfig", () => {
       {
         name: "token mode without token",
         cfg: { gateway: { bind: "lan" as const, auth: { mode: "token" as const } } },
-        expectedMessage: "gateway auth mode is token, but no token was configured",
+        expectedMessage:
+          "gateway auth mode is token, but no token was configured (set gateway.auth.token or OPENCLAW_GATEWAY_TOKEN)",
       },
       {
         name: "lan binding with explicit none auth",
@@ -160,6 +199,97 @@ describe("resolveGatewayRuntimeConfig", () => {
       await expect(resolveGatewayRuntimeConfig({ cfg, port: 18789, host })).rejects.toThrow(
         expectedMessage,
       );
+    });
+
+    it.each([
+      {
+        name: "rejects non-loopback control UI when allowed origins are missing",
+        cfg: {
+          gateway: {
+            bind: "lan" as const,
+            auth: TOKEN_AUTH,
+          },
+        },
+        expectedError: "non-loopback Control UI requires gateway.controlUi.allowedOrigins",
+      },
+      {
+        name: "allows non-loopback control UI without allowed origins when dangerous fallback is enabled",
+        cfg: {
+          gateway: {
+            bind: "lan" as const,
+            auth: TOKEN_AUTH,
+            controlUi: {
+              dangerouslyAllowHostHeaderOriginFallback: true,
+            },
+          },
+        },
+        expectedBindHost: "0.0.0.0",
+      },
+      {
+        name: "allows non-loopback control UI when allowed origins collapse after trimming",
+        cfg: {
+          gateway: {
+            bind: "lan" as const,
+            auth: TOKEN_AUTH,
+            controlUi: {
+              allowedOrigins: ["  https://control.example.com  "],
+            },
+          },
+        },
+        expectedBindHost: "0.0.0.0",
+      },
+    ])("$name", async ({ cfg, expectedError, expectedBindHost }) => {
+      if (expectedError) {
+        await expect(resolveGatewayRuntimeConfig({ cfg, port: 18789 })).rejects.toThrow(
+          expectedError,
+        );
+        return;
+      }
+      const result = await resolveGatewayRuntimeConfig({ cfg, port: 18789 });
+      expect(result.bindHost).toBe(expectedBindHost);
+    });
+  });
+
+  describe("HTTP security headers", () => {
+    const cases = [
+      {
+        name: "resolves strict transport security headers from config",
+        strictTransportSecurity: "  max-age=31536000; includeSubDomains  ",
+        expected: "max-age=31536000; includeSubDomains",
+      },
+      {
+        name: "does not set strict transport security when explicitly disabled",
+        strictTransportSecurity: false,
+        expected: undefined,
+      },
+      {
+        name: "does not set strict transport security when the value is blank",
+        strictTransportSecurity: "   ",
+        expected: undefined,
+      },
+    ] satisfies ReadonlyArray<{
+      name: string;
+      strictTransportSecurity: string | false;
+      expected: string | undefined;
+    }>;
+
+    it.each(cases)("$name", async ({ strictTransportSecurity, expected }) => {
+      const result = await resolveGatewayRuntimeConfig({
+        cfg: {
+          gateway: {
+            bind: "loopback",
+            auth: { mode: "none" },
+            http: {
+              securityHeaders: {
+                strictTransportSecurity,
+              },
+            },
+          },
+        },
+        port: 18789,
+      });
+
+      expect(result.strictTransportSecurityHeader).toBe(expected);
     });
   });
 });

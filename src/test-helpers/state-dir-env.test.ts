@@ -10,23 +10,30 @@ import {
 
 type EnvSnapshot = {
   openclaw?: string;
-  legacy?: string;
 };
 
 function snapshotCurrentStateDirVars(): EnvSnapshot {
   return {
     openclaw: process.env.OPENCLAW_STATE_DIR,
-    legacy: process.env.CLAWDBOT_STATE_DIR,
   };
 }
 
 function expectStateDirVars(snapshot: EnvSnapshot) {
   expect(process.env.OPENCLAW_STATE_DIR).toBe(snapshot.openclaw);
-  expect(process.env.CLAWDBOT_STATE_DIR).toBe(snapshot.legacy);
 }
 
 async function expectPathMissing(filePath: string) {
   await expect(fs.stat(filePath)).rejects.toThrow();
+}
+
+async function expectStateDirEnvRestored(params: {
+  prev: EnvSnapshot;
+  capturedStateDir: string;
+  capturedTempRoot: string;
+}) {
+  expectStateDirVars(params.prev);
+  await expectPathMissing(params.capturedStateDir);
+  await expectPathMissing(params.capturedTempRoot);
 }
 
 describe("state-dir-env helpers", () => {
@@ -36,7 +43,6 @@ describe("state-dir-env helpers", () => {
 
     setStateDirEnv("/tmp/openclaw-state-dir-test");
     expect(process.env.OPENCLAW_STATE_DIR).toBe("/tmp/openclaw-state-dir-test");
-    expect(process.env.CLAWDBOT_STATE_DIR).toBeUndefined();
 
     restoreStateDirEnv(snapshot);
     expectStateDirVars(prev);
@@ -51,13 +57,10 @@ describe("state-dir-env helpers", () => {
       capturedTempRoot = tempRoot;
       capturedStateDir = stateDir;
       expect(process.env.OPENCLAW_STATE_DIR).toBe(stateDir);
-      expect(process.env.CLAWDBOT_STATE_DIR).toBeUndefined();
       await fs.writeFile(path.join(stateDir, "probe.txt"), "ok", "utf8");
     });
 
-    expectStateDirVars(prev);
-    await expectPathMissing(capturedStateDir);
-    await expectPathMissing(capturedTempRoot);
+    await expectStateDirEnvRestored({ prev, capturedStateDir, capturedTempRoot });
   });
 
   it("withStateDirEnv restores env and cleans temp root when callback throws", async () => {
@@ -73,8 +76,6 @@ describe("state-dir-env helpers", () => {
       }),
     ).rejects.toThrow("boom");
 
-    expectStateDirVars(prev);
-    await expectPathMissing(capturedStateDir);
-    await expectPathMissing(capturedTempRoot);
+    await expectStateDirEnvRestored({ prev, capturedStateDir, capturedTempRoot });
   });
 });
