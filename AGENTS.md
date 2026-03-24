@@ -1,3 +1,15 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Architecture Overview
+
+OpenClaw is a **multi-channel AI gateway** that connects AI agents (Pi runtime) to 15+ messaging platforms (Telegram, Discord, Slack, WhatsApp, Signal, iMessage, Google Chat, and more via extensions). The gateway runs as a WebSocket control plane on `ws://127.0.0.1:18789`, manages sessions/cron/canvas, and routes messages to the Pi agent runtime which executes tools (browser, canvas, webhooks, skills).
+
+Key packages: `pnpm` monorepo with `src/` (core CLI + gateway + channels), `extensions/*` (pluggable channels/memory/auth), `apps/` (macOS/iOS/Android companions), `ui/` (React web UI). Tech stack: TypeScript (ESM), Node 22+, Bun (preferred for execution), Vitest, Oxlint/Oxfmt.
+
+---
+
 # Repository Guidelines
 
 - Repo: https://github.com/openclaw/openclaw
@@ -71,7 +83,7 @@
 - Lint/format: `pnpm check`
 - Format check: `pnpm format` (oxfmt --check)
 - Format fix: `pnpm format:fix` (oxfmt --write)
-- Tests: `pnpm test` (vitest); coverage: `pnpm test:coverage`
+- Tests: `pnpm test` (vitest); coverage: `pnpm test:coverage`; single file: `pnpm test <path/to/file.test.ts>`
 - Generated baseline artifacts live together under `docs/.generated/`.
 - Config schema drift uses `pnpm config:docs:gen` / `pnpm config:docs:check`.
 - Plugin SDK API drift uses `pnpm plugin-sdk:api:gen` / `pnpm plugin-sdk:api:check`.
